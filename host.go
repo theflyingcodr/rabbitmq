@@ -1,4 +1,4 @@
-package events
+package messaging
 
 type HostConfig struct{
 	Address string
@@ -13,20 +13,22 @@ func (h *HostConfig) GetQos() int{
 	return h.Qos
 }
 
-
 // Host is the container which is used
 // to host all consumers that are registered.
-// It is responsable for the amqp connection
+// It is responsible for the amqp connection
 // starting & gracefully stopping all running consumers
+// h := NewRabbitHost().Init(cfg.Host)
+// h.AddBroker(NewBroker(cfg.Exchange, [])
 type Host interface{
 	// Init sets up the initial connection & quality of service
 	// to be used by all registered consumers
-	Init(HostConfig, []Broker) (err error)
+	Init(*HostConfig) (err error)
+	// AddBroker will register an exchange and n consumers
+	// which will consume from that exchange
+	AddBroker(*ExchangeConfig, []Consumer) error
 	// Start will setup all queues and routing keys
 	// assigned to each consumer and then in turn start them
-	Start() (err error)
-	// Stop is used to gracefully stop all running consumers
-	Stop() (err error)
+	Run() (err error)
 }
 
 // BasicMessage is a generic message that

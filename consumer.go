@@ -1,4 +1,4 @@
-package events
+package messaging
 
 import (
 	"context"
@@ -53,7 +53,10 @@ type ConsumerConfig struct{
 //	}
 //
 type Consumer interface{
-	Init(cfg ConsumerConfig) error
+	// Init can be used to get a custom
+	// consumer config. If it returns nil a consumer
+	// with default params will be setup
+	Init() (ConsumerConfig, error)
 	// Prefix defines a common prefix to be added
 	// to all queue names
 	Prefix() string

@@ -1,1 +1,1 @@
-package events
+package messaging
