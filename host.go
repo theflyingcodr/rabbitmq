@@ -1,5 +1,10 @@
 package messaging
 
+import (
+	"context"
+	"time"
+)
+
 type HostConfig struct{
 	Address string
 	Qos int
@@ -22,27 +27,47 @@ func (h *HostConfig) GetQos() int{
 type Host interface{
 	// Init sets up the initial connection & quality of service
 	// to be used by all registered consumers
-	Init(*HostConfig) (err error)
+	Init(context.Context, *HostConfig) (err error)
 	// AddBroker will register an exchange and n consumers
 	// which will consume from that exchange
-	AddBroker(*ExchangeConfig, []Consumer) error
+	AddBroker(context.Context, *ExchangeConfig, []Consumer) error
 	// Start will setup all queues and routing keys
 	// assigned to each consumer and then in turn start them
-	Run() (err error)
+	Run(context.Context) (err error)
+
+	// Stop can be called when you wish to shut down the host
+	Stop(context.Context) error
 }
 
-// BasicMessage is a generic message that
+// AMQPMessage is a generic AMQPMessage message that
 // can get transformed via middleware
 // to something more useful
-type BasicMessage struct{
-	ID int64
-	Headers map[string]string
+type AMQPMessage struct{
+	ID string
+	UserID string
+	Subject string
+	ReplyTo string
+	CorrelationID string
+	ContentType string
+	ContentEncoding string
+	Expiry string
+	Created time.Time
+	Headers map[string]interface{}
 	Body interface{}
+	Args map[string]interface{}
 }
 
-type HandlerFunc func(BasicMessage) error
+type AMQPResponse struct{
 
-func (f HandlerFunc) HandleMessage(m BasicMessage) error{
-	return f(m)
+}
+
+type AMQPHandler interface{
+	HandleMessage(m AMQPMessage) error
+}
+
+type HandlerFunc func(AMQPMessage, error)
+
+func (f HandlerFunc) HandleMessage(m AMQPMessage, e error) {
+	f(m, e)
 }
 

@@ -1,26 +1,27 @@
 package main
 
 import (
-	"bitbucket.org/azertsoftware/events/rabbitmq"
-	"bitbucket.org/azertsoftware/events"
-	"github.com/derekparker/delve/service"
+	"github.com/azert-software/messaging"
+	"github.com/azert-software/messaging/rabbitmq"
+	"github.com/azert-software/messaging/examples/consumer"
+	"github.com/sirupsen/logrus"
+	"context"
 )
 
 func main(){
-	svcBroker := NewBroker(service.Config{}, []{NewMyConsumer(myConfig)} )
-	h := host.Init(cfg)
-
-
-	rabbitmq.NewRabbitHost(&events.HostConfig{}).
-		Init()
+	host := rabbitmq.RabbitHost{}
+	if err := host.Init( context.Background(), &messaging.HostConfig{Address:"amqp://guest:guest@localhost:5672/",}); err != nil{
+		return
+	}
+	eCfg := &messaging.ExchangeConfig{
+		Name:"test",
+	}
+	host.AddBroker(context.Background(),eCfg,[]messaging.Consumer{consumer.NewMyConsumer()})
+	if err := host.Run(context.Background()); err != nil{
+		logrus.Error(err)
+	}
 }
 
 type config struct{
-	ConsumerHost events.HostConfig
-	MyConsumer Rabbit
-}
-
-type Rabbit struct{
-	Exchange rabbitmq.ExchangeConfig
-	Consumer events.ConsumerConfig
+	ConsumerHost messaging.HostConfig
 }

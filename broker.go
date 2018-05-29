@@ -1,6 +1,8 @@
 package messaging
 
-import "errors"
+import (
+	"errors"
+)
 
 const (
 	TOPIC_EXCHANGE = "topic"
@@ -11,7 +13,7 @@ const (
 // Defaults are enabled so not all params
 // may need set depending on requirements
 type ExchangeConfig struct{
-	name string
+	Name string
 	exType *string
 	durable *bool
 	autoDelete *bool
@@ -28,8 +30,8 @@ type BrokerConfig struct{
 // set in config, if nil then it returns a
 // default of false
 func (e *ExchangeConfig) GetName() (string, error){
-	if e.name != ""{
-		return e.name, nil
+	if e.Name != ""{
+		return e.Name, nil
 	}
 
 	return "", errors.New("name is a required exchange field")
@@ -88,4 +90,5 @@ func (e *ExchangeConfig) GetArgs() map[string]interface{}{
 
 type Broker interface{
 	Start(BrokerConfig, []Consumer) error
+
 }

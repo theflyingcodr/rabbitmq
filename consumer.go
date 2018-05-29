@@ -133,17 +133,18 @@ type Consumer interface{
 	// Init can be used to get a custom
 	// consumer config. If it returns nil a consumer
 	// with default params will be setup
-	Init() (ConsumerConfig, error)
+	Init() (*ConsumerConfig, error)
 	// Prefix defines a common prefix to be added
 	// to all queue names
 	Prefix() string
 	// Middleware can be used to implement custom
 	// middleware which gets called before messages
 	// are passed to handlers
-	Middleware(next HandlerFunc) HandlerFunc
+	Middleware(HandlerFunc) HandlerFunc
 	// Setup is used to define the queues, keys and handlers
 	// Config is passed which can be used to set QOS and consumer name
-	Setup(ctx context.Context) (map[string]*ConsumerRoutes)
+	Setup(context.Context) (map[string]*ConsumerRoutes)
+
 }
 
 type ConsumerRoutes struct{
