@@ -1,11 +1,15 @@
 package messaging
 
-import "github.com/labstack/gommon/log"
+import (
+	"log"
+	"context"
+)
 
 func Logger(h HandlerFunc) HandlerFunc{
-	return func(msg AMQPMessage) error{
-		log.Infof("message with ID %v received", msg.ID)
+	return func(ctx context.Context, msg AMQPMessage) error{
+		log.Printf("message with ID %v received", msg.ID)
 
-		return h(msg)
+		e:= h(ctx, msg)
+		return e
 	}
 }

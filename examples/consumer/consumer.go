@@ -3,6 +3,8 @@ package consumer
 import (
 	"context"
 	"github.com/azert-software/messaging"
+	"github.com/streadway/amqp"
+	"github.com/azert-software/messaging/rabbitmq"
 )
 
 type MyConsumer struct{
@@ -33,6 +35,26 @@ func(c *MyConsumer) Setup(ctx context.Context) (map[string]*messaging.ConsumerRo
 	}
 }
 
-func (c *MyConsumer) TestHandler(m messaging.BasicMessage) error{
+func(c *MyConsumer)DeliveryMiddleware(rabbitmq.DeliveryHandlerFunc) rabbitmq.DeliveryHandlerFunc{
+	return func(ctx context.Context, delivery amqp.Delivery) error {
+		delivery.Ack(false)
+		return nil
+	}
+}
+
+func(c *MyConsumer)SetupDelivery(ctx context.Context) (map[string]*rabbitmq.DeliveryRoutes){
+	return map[string]*rabbitmq.DeliveryRoutes{
+		"mark.rabbitqueue":{
+			Keys: []string{"test.message", "mark.#"},
+			DeliveryFunc:c.HandleDelivery,
+		},
+	}
+}
+
+func (c *MyConsumer) TestHandler(ctx context.Context, m messaging.AMQPMessage) error{
+	return nil
+}
+
+func (h *MyConsumer) HandleDelivery(ctx context.Context, delivery amqp.Delivery) error{
 	return nil
 }

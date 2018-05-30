@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"fmt"
 )
 
 type RabbitHost struct{
@@ -68,7 +69,7 @@ func (h *RabbitHost) Run(ctx context.Context,) (err error){
 				cfg = &messaging.ConsumerConfig{}
 			}
 
-			for k, r := range c.Setup(context.Background()){
+			for k, r := range c.Queues(context.Background()){
 				go func() {
 					log.Infof("setting up queue %s", k)
 					// each consumer has its own channel & each queue has its own consumer
@@ -86,9 +87,18 @@ func (h *RabbitHost) Run(ctx context.Context,) (err error){
 					if err != nil {
 						log.Fatal(err)
 					}
+					dlq := fmt.Sprintf("%s.deadletter",k)
+					_, err = queueChannel.QueueDeclare(dlq, true, false, false, false, nil)
+					if err != nil {
+						log.Fatal(err)
+					}
+
 					for _, key := range r.Keys {
 						log.Debugf("binding key %s to queue %s",key, k)
 						if err = queueChannel.QueueBind(k, key, n, cfg.GetNoWait(), cfg.Args); err != nil {
+							log.Fatal(err)
+						}
+						if err = queueChannel.QueueBind(dlq, key, fmt.Sprintf("%s.deadletter", n), false, nil); err != nil {
 							log.Fatal(err)
 						}
 					}
@@ -102,7 +112,7 @@ func (h *RabbitHost) Run(ctx context.Context,) (err error){
 					for d := range msgs{
 
 
-						messaging.Logger(r.Handler(DeliveryToMessage(d)))
+						err := r.Handler(context.Background(), DeliveryToMessage(c.Middleware))
 						log.Infof("Received %s", d.Body)
 					}
 				}()
@@ -144,10 +154,22 @@ func (h *RabbitHost) BuildExchange(ch *amqp.Channel, b Broker) (err error){
 	}
 
 	log.Debugf("setting up %s exchange", n)
+	dlx := fmt.Sprintf("%s.deadletter", n)
+
+	if err = ch.ExchangeDeclare(dlx, ex.GetType(), ex.GetDurable(), ex.GetAutoDelete(), ex.GetInternal(), false, ex.GetArgs()); err != nil{
+		log.Errorf("error when setting up deadletter exchange %s: %s", dlx)
+		return
+	}
+
+	args := ex.GetArgs()
+	args["x-dead-letter-exchange"] = dlx
+
 	if err = ch.ExchangeDeclare(n, ex.GetType(), ex.GetDurable(), ex.GetAutoDelete(), ex.GetInternal(), false, ex.GetArgs()); err != nil{
 		log.Errorf("error when setting up exchange %s: %s",n, err.Error())
 		return
 	}
+
+
 	log.Debugf("%s exchange setup success", n)
 	return
 }

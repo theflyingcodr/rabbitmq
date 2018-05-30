@@ -1,24 +1,25 @@
 package rabbitmq
 
 import (
-	"github.com/streadway/amqp"
 	"github.com/azert-software/messaging"
+	"github.com/streadway/amqp"
+	"context"
 )
 
-func DeliveryToMessage(delivery amqp.Delivery) (msg messaging.AMQPMessage){
-		msg = messaging.AMQPMessage{
-			ID:              delivery.MessageId,
-			Body:            delivery.Body,
-			Headers:         delivery.Headers,
-			ContentEncoding: delivery.ContentEncoding,
-			ContentType:     delivery.ContentType,
-			CorrelationID:   delivery.CorrelationId,
-			Created:         delivery.Timestamp,
-			ReplyTo:         delivery.ReplyTo,
-			Subject:         delivery.RoutingKey,
-			UserID:          delivery.UserId,
-			Expiry:          delivery.Expiration,
-		}
+func DeliveryToMessage(h DeliveryHandlerFunc) (handlerFunc messaging.HandlerFunc){
+}
 
-		return
+type DeliveryHandlerFunc func(ctx context.Context, delivery amqp.Delivery) error
+
+func(h DeliveryHandlerFunc) HandleMessage(ctx context.Context, m messaging.AMQPMessage) error {
+	e := h(ctx, amqp.Delivery{})
+	return e
+}
+
+func (h *DeliveryHandlerFunc) HandleDelivery(ctx context.Context, delivery amqp.Delivery) error{
+	return nil
+}
+
+func LoggingHandler(ctx context.Context, delivery amqp.Delivery) error{
+
 }

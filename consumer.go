@@ -141,9 +141,9 @@ type Consumer interface{
 	// middleware which gets called before messages
 	// are passed to handlers
 	Middleware(HandlerFunc) HandlerFunc
-	// Setup is used to define the queues, keys and handlers
+	// Queues is used to define the queues, keys and handlers
 	// Config is passed which can be used to set QOS and consumer name
-	Setup(context.Context) (map[string]*ConsumerRoutes)
+	Queues(context.Context) (map[string]*ConsumerRoutes)
 
 }
 

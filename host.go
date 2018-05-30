@@ -57,17 +57,13 @@ type AMQPMessage struct{
 	Args map[string]interface{}
 }
 
-type AMQPResponse struct{
-
+type MessageHandler interface {
+	HandleMessage(ctx context.Context, m AMQPMessage) error
 }
 
-type AMQPHandler interface{
-	HandleMessage(m AMQPMessage) error
-}
+type HandlerFunc func(context.Context, AMQPMessage) error
 
-type HandlerFunc func(AMQPMessage, error)
-
-func (f HandlerFunc) HandleMessage(m AMQPMessage, e error) {
-	f(m, e)
+func (f HandlerFunc) HandleMessage(ctx context.Context, m AMQPMessage) error {
+	return f(ctx, m)
 }
 
