@@ -7,7 +7,6 @@ import (
 	"errors"
 	"runtime/debug"
 	"fmt"
-	"encoding/json"
 )
 
 func loggingMiddleware(h HandlerFunc) HandlerFunc {
@@ -49,43 +48,6 @@ func errorHandler(ch *amqp.Channel, h KeyHandlerFunc) HandlerFunc{
 		err := h(ctx, d)
 		if err != nil {
 			log.Infof("error sending message with key %s & id %v. Error: %s", d.RoutingKey, d.MessageId, err.Error())
-			// if it's a json body then include the error
-			// in the body so it can be read in the dlq
-			log.Info(d.ContentType)
-			if d.ContentType == "application/json" {
-				var body map[string]interface{}
-				jsErr := json.Unmarshal(d.Body, &body)
-				if jsErr != nil {
-					log.Errorf("error unmarshalling body %s", jsErr)
-					return
-				}
-				body["error"] = err.Error()
-				js, err := json.Marshal(body)
-				if err != nil {
-					log.Errorf("error marshalling body %s", err)
-					return
-				}
-
-				if err := ch.Publish(fmt.Sprintf("%s.deadletter", d.Exchange),d.RoutingKey, false, false, amqp.Publishing{
-					Headers:d.Headers,
-					ContentType:d.ContentType,
-					Body:js,
-					MessageId:d.MessageId,
-					UserId:d.UserId,
-					Type:d.Type,
-					Timestamp:d.Timestamp,
-					AppId:d.AppId,
-					ContentEncoding:d.ContentEncoding,
-					CorrelationId:d.CorrelationId,
-					DeliveryMode:d.DeliveryMode,
-					Expiration:d.Expiration,
-					Priority:d.Priority,
-					ReplyTo:d.ReplyTo,
-				}); err != nil{
-					log.Errorf("error publishing message with error to exchange %s", err.Error())
-				}
-				d.Ack(false)
-			}
 			d.Nack(false, false)
 		} else{
 			d.Ack(false)
