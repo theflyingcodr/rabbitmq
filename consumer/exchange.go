@@ -1,11 +1,13 @@
-package messaging
+package consumer
 
-import (
-	"errors"
-)
+import "errors"
 
 const (
 	TOPIC_EXCHANGE = "topic"
+)
+
+var (
+	ERRNAMEREQUIRED = errors.New("name is a required exchange field")
 )
 
 // Exchange config sets up a new
@@ -34,7 +36,7 @@ func (e *ExchangeConfig) GetName() (string, error){
 		return e.Name, nil
 	}
 
-	return "", errors.New("name is a required exchange field")
+	return "", ERRNAMEREQUIRED
 }
 
 // GetType returns the type of exchange
@@ -85,10 +87,9 @@ func (e *ExchangeConfig) GetInternal() bool{
 // GetArgs gets a table of arbitrary arguments
 // which are passed to the exchange
 func (e *ExchangeConfig) GetArgs() map[string]interface{}{
+	if e.args == nil{
+		return make(map[string]interface{})
+	}
 	return e.args
 }
 
-type Broker interface{
-	Start(BrokerConfig, []Consumer) error
-
-}
