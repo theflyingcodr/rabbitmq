@@ -1,6 +1,11 @@
 package consumer
 
-import "errors"
+import (
+	"errors"
+	"github.com/streadway/amqp"
+	"fmt"
+	log "github.com/sirupsen/logrus"
+)
 
 const (
 	TOPIC_EXCHANGE = "topic"
@@ -93,3 +98,26 @@ func (e *ExchangeConfig) GetArgs() map[string]interface{}{
 	return e.args
 }
 
+// BuildExchange builds an exchange
+func (e *ExchangeConfig) BuildExchange(ch *amqp.Channel) (err error){
+	n, err := e.GetName()
+	if err != nil{
+		log.Error(err)
+		return err
+	}
+
+	log.Debugf("setting up %s exchange", n)
+
+	dlx := fmt.Sprintf("%s.deadletter", n)
+	if err = ch.ExchangeDeclare(dlx, e.GetType(), e.GetDurable(), e.GetAutoDelete(), e.GetInternal(), false, nil); err != nil{
+		log.Errorf("error when setting up deadletter exchange %s: %s", dlx)
+		return
+	}
+
+	if err = ch.ExchangeDeclare(n, e.GetType(), e.GetDurable(),e.GetAutoDelete(), e.GetInternal(), false, e.GetArgs()); err != nil{
+		log.Errorf("error when setting up exchange %s: %s",n, err.Error())
+		return
+	}
+	log.Debugf("%s exchange setup success", n)
+	return
+}

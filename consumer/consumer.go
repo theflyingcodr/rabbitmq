@@ -4,6 +4,8 @@ import (
 	"context"
 	"github.com/pborman/uuid"
 	"fmt"
+	log "github.com/sirupsen/logrus"
+	"github.com/streadway/amqp"
 )
 
 // Consumer is an interface which can be implemented
@@ -167,4 +169,61 @@ func (e *ConsumerConfig) GetArgs() map[string]interface{}{
 	return e.Args
 }
 
+func (c *ConsumerConfig) BuildConsumer(consumer Consumer, ch *amqp.Channel, ex string, m MiddlewareList) {
+	for k, r := range consumer.Queues(context.Background()){
+		go func() {
+			log.Infof("setting up queue %s", k)
+			defer ch.Close()
+
+			if err := ch.Qos(int(c.GetPrefetchCount()), int(c.GetPrefetchSize()), false); err != nil {
+				log.Fatal(err)
+			}
+
+			dlx := fmt.Sprintf("%s.deadletter", ex)
+			a := c.GetArgs()
+			a["x-dead-letter-exchange"] = dlx
+			_, err := ch.QueueDeclare(k, c.GetDurable(), c.GetAutoDelete(), c.GetExclusive(), c.GetNoWait(), a)
+			if err != nil {
+				log.Fatal(err)
+			}
+			dlq := fmt.Sprintf("%s.deadletter",k)
+			_, err = ch.QueueDeclare(dlq, true, false, false, false, nil)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			for _, key := range r.Keys {
+				log.Debugf("binding key %s to queue %s",key, k)
+				if err = ch.QueueBind(k, key, ex, c.GetNoWait(), c.Args); err != nil {
+					log.Fatal(err)
+				}
+				if err = ch.QueueBind(dlq, key, fmt.Sprintf("%s.deadletter", ex), false, nil); err != nil {
+					log.Fatal(err)
+				}
+			}
+			log.Infof("queue %s setup",k)
+
+			msgs, err := ch.Consume(k,c.Name,false,c.GetExclusive(),false,c.GetNoWait(), c.Args)
+			if err != nil{
+				log.Fatal(err)
+			}
+
+			middleware := buildChain(consumer.Middleware(errorHandler(r.DeliveryFunc)), m)
+			for d := range msgs{
+				panicHandler(middleware).HandleMessage(context.Background(), d)
+			}
+		}()
+	}
+}
+
+
+// buildChain builds the middleware chain recursively, functions are first class
+func buildChain(f HandlerFunc, m MiddlewareList) HandlerFunc {
+	// if our chain is done, use the original handlerfunc
+	if len(m) == 0 {
+		return f
+	}
+	// otherwise nest the handlerfuncs
+	return m[0](buildChain(f, m[1:cap(m)]))
+}
 

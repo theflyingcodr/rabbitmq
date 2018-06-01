@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"fmt"
+	"errors"
+	"runtime/debug"
+	"time"
 )
 
 // HostConfig contains global config
@@ -23,9 +25,6 @@ type HostConfig struct{
 // h := NewRabbitHost().Init(cfg.Host)
 // h.AddBroker(NewBroker(cfg.Exchange, [])
 type Host interface{
-	// Init sets up the initial connection & quality of service
-	// to be used by all registered consumers
-	Init(context.Context, *HostConfig) (err error)
 	// AddBroker will register an exchange and n consumers
 	// which will consume from that exchange
 	AddBroker(context.Context, *ExchangeConfig, []Consumer) error
@@ -35,7 +34,7 @@ type Host interface{
 	// Middleware can be used to implement custom
 	// middleware which gets called before messages
 	// are passed to handlers
-	Middleware(...MiddlewareList)
+	Middleware(...HostMiddleware)
 	// Stop can be called when you wish to shut down the host
 	Stop(context.Context) error
 }
@@ -46,6 +45,7 @@ type RabbitHost struct{
 	exchanges []Exchange
 	channels map[string]*amqp.Channel
 	middleware MiddlewareList
+	connectionClose chan *amqp.Error
 }
 
 type Exchange struct{
@@ -55,15 +55,16 @@ type Exchange struct{
 
 // Init sets up the initial connection & quality of service
 // to be used by all registered consumers
-func (h *RabbitHost) Init(ctx context.Context, cfg *HostConfig) (err error){
-	h.exchanges = make([]Exchange, 0)
-	h.channels = make(map[string]*amqp.Channel)
-	h.c = cfg
-	h.connection, err = amqp.Dial(h.c.Address)
-	if err != nil{
-		log.Errorf("error dialing rabbit %v", err)
+func NewConsumerHost(cfg *HostConfig) Host{
+	host := &RabbitHost{
+		exchanges:make([]Exchange, 0),
+		channels:make(map[string]*amqp.Channel),
+		c: cfg,
+		connectionClose:make(chan *amqp.Error),
 	}
-	return
+	go host.rabbitConnector()
+	host.connectionClose <- amqp.ErrClosed
+	return host
 }
 
 // AddBroker will register an exchange and n consumers
@@ -77,6 +78,7 @@ func (h *RabbitHost) AddBroker(ctx context.Context, cfg *ExchangeConfig, consume
 // Start will setup all queues and routing keys
 // assigned to each consumer and then in turn start them
 func (h *RabbitHost) Run(ctx context.Context) (err error){
+	for h.connection == nil{}
 	ch, err := h.connection.Channel()
 	if err != nil{
 		log.Errorf("error when getting channel from connection: %v", err.Error())
@@ -88,7 +90,8 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 			log.Error(err)
 			return err
 		}
-		h.BuildExchange(ch, b)
+		b.exchange.BuildExchange(ch)
+
 		for _, c := range b.consumers {
 			cfg, err := c.Init()
 			if err != nil{
@@ -98,62 +101,14 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 			if cfg == nil{
 				cfg = &ConsumerConfig{}
 			}
-
-			for k, r := range c.Queues(context.Background()){
-				go func() {
-					log.Infof("setting up queue %s", k)
-					// each consumer has its own channel & each queue has its own consumer
-					queueChannel, err := h.connection.Channel()
-					if err != nil {
-						log.Fatal(err)
-					}
-					defer queueChannel.Close()
-					h.channels[cfg.GetName()] = queueChannel
-
-					if err = queueChannel.Qos(int(cfg.GetPrefetchCount()), int(cfg.GetPrefetchSize()), false); err != nil {
-						log.Fatal(err)
-					}
-
-					dlx := fmt.Sprintf("%s.deadletter", n)
-					a := cfg.GetArgs()
-					a["x-dead-letter-exchange"] = dlx
-					_, err = queueChannel.QueueDeclare(k, cfg.GetDurable(), cfg.GetAutoDelete(), cfg.GetExclusive(), cfg.GetNoWait(), a)
-					if err != nil {
-						log.Fatal(err)
-					}
-					dlq := fmt.Sprintf("%s.deadletter",k)
-					_, err = queueChannel.QueueDeclare(dlq, true, false, false, false, nil)
-					if err != nil {
-						log.Fatal(err)
-					}
-
-					for _, key := range r.Keys {
-						log.Debugf("binding key %s to queue %s",key, k)
-						if err = queueChannel.QueueBind(k, key, n, cfg.GetNoWait(), cfg.Args); err != nil {
-							log.Fatal(err)
-						}
-						if err = queueChannel.QueueBind(dlq, key, fmt.Sprintf("%s.deadletter", n), false, nil); err != nil {
-							log.Fatal(err)
-						}
-					}
-					log.Infof("queue %s setup",k)
-
-					msgs, err := queueChannel.Consume(k,cfg.Name,false,cfg.GetExclusive(),false,cfg.GetNoWait(), cfg.Args)
-					if err != nil{
-						log.Fatal(err)
-					}
-
-					var fn HandlerFunc
-					ch, _ := h.connection.Channel()
-					for i := range h.middleware.middleware {
-						fn = h.middleware.middleware[len(h.middleware.middleware)-1-i](c.Middleware(errorHandler(ch, r.DeliveryFunc)))
-					}
-
-					for d := range msgs{
-						panicHandler(fn).HandleMessage(context.Background(), d)
-					}
-				}()
+			queueChannel, err := h.connection.Channel()
+			if err != nil{
+				log.Error(err)
+				return err
 			}
+			h.channels[cfg.GetName()] = queueChannel
+
+			cfg.BuildConsumer(c, queueChannel, n, h.middleware)
 		}
 	}
 
@@ -167,7 +122,7 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 }
 
 func (h *RabbitHost) Middleware(fn ...HostMiddleware) {
-	h.middleware = MiddlewareList{append(([]HostMiddleware)(nil), fn...)}
+	h.middleware = append(h.middleware, fn...)
 }
 
 func (h *RabbitHost) Stop(context.Context) error{
@@ -185,32 +140,83 @@ func (h *RabbitHost) Stop(context.Context) error{
 	return h.connection.Close()
 }
 
-// BuildExchange builds an exchange
-func (h *RabbitHost) BuildExchange(ch *amqp.Channel, b Exchange) (err error){
-	ex := b.exchange
-	n, err := ex.GetName()
-	if err != nil{
+// panicHandler intercepts panics from a consumer, logs
+// the error and stack trace then nacks the message
+func panicHandler(h HandlerFunc) HandlerFunc{
+	return func(ctx context.Context, d amqp.Delivery) {
+		var err error
+		defer func() {
+			r := recover()
+			if r != nil {
+				switch t := r.(type) {
+				case string:
+					err = errors.New(t)
+				case error:
+					err = t
+				default:
+					err = errors.New("unknown error")
+				}
+				log.Errorf("panic handler recovered from unexpected panic, error: %s", err)
+				log.Debugf("stack: %s", debug.Stack())
+				d.Nack(false, false)
+			}
+		}()
+
+		h(ctx, d)
+
+	}
+}
+
+// errorHandler performs two functions
+// it handles an error and returns an Ack if nil or a
+// nack if err is not nil
+// It also converts a KeyHandlerFunc to a HandlerFunc
+// so middleware can be chained
+func errorHandler(h KeyHandlerFunc) HandlerFunc{
+	return func(ctx context.Context, d amqp.Delivery){
+		err := h(ctx, d)
+		if err != nil {
+			log.Infof("error sending message with key %s and correlationid %v. Error: %s", d.RoutingKey, d.CorrelationId, err.Error())
+			d.Nack(false, false)
+		} else{
+			d.Ack(false)
+		}
+	}
+}
+
+// HostMiddleware is
+type HostMiddleware func(handler HandlerFunc) HandlerFunc
+
+type MiddlewareList []HostMiddleware
+
+func (h *RabbitHost) connect(){
+	for {
+		conn, err := amqp.Dial(h.c.Address)
+
+		if err == nil {
+			h.connection = conn
+			break
+		}
+
 		log.Error(err)
-		return err
+		log.Infof("Trying to reconnect to RabbitMQ at %s\n", h.c.Address)
+		time.Sleep(200 * time.Millisecond)
 	}
+}
 
-	log.Debugf("setting up %s exchange", n)
+func (h *RabbitHost) rabbitConnector() {
+	println("hit connecter")
+	var rabbitErr *amqp.Error
 
-	dlx := fmt.Sprintf("%s.deadletter", n)
-	if err = ch.ExchangeDeclare(dlx, ex.GetType(), ex.GetDurable(), ex.GetAutoDelete(), ex.GetInternal(), false, ex.GetArgs()); err != nil{
-		log.Errorf("error when setting up deadletter exchange %s: %s", dlx)
-		return
+	for {
+		rabbitErr = <-h.connectionClose
+		if rabbitErr != nil {
+			log.Infof("connecting to %s\n", h.c.Address)
+
+			h.connect()
+			h.connectionClose = make(chan *amqp.Error)
+			for h.connection == nil {}
+			h.connection.NotifyClose(h.connectionClose)
+		}
 	}
-
-	args := ex.GetArgs()
-	args["x-dead-letter-exchange"] = dlx
-
-	if err = ch.ExchangeDeclare(n, ex.GetType(), ex.GetDurable(), ex.GetAutoDelete(), ex.GetInternal(), false, ex.GetArgs()); err != nil{
-		log.Errorf("error when setting up exchange %s: %s",n, err.Error())
-		return
-	}
-
-
-	log.Debugf("%s exchange setup success", n)
-	return
 }

@@ -11,17 +11,15 @@ import (
 func main(){
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 	logrus.SetLevel(logrus.DebugLevel)
-	host := consumer.RabbitHost{}
-	if err := host.Init( context.Background(), &consumer.HostConfig{Address:"amqp://guest:guest@localhost:5672/",}); err != nil{
-		return
-	}
-	eCfg := &consumer.ExchangeConfig{
-		Name:"test",
-	}
 
-	host.Middleware( consumer.MessageDump, consumer.JsonHandler)
+	host := consumer.NewConsumerHost(&consumer.HostConfig{Address:"amqp://guest:guest@localhost:5672/"})
+
+	eCfg := &consumer.ExchangeConfig{Name:"test"}
+
+	host.Middleware(consumer.MessageDump, consumer.JsonHandler)
 
 	host.AddBroker(context.Background(),eCfg,[]consumer.Consumer{NewMyConsumer()})
+
 	if err := host.Run(context.Background()); err != nil{
 		logrus.Error(err)
 	}
