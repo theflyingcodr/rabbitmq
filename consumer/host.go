@@ -62,7 +62,7 @@ func NewConsumerHost(cfg *HostConfig) Host{
 		c: cfg,
 		connectionClose:make(chan *amqp.Error),
 	}
-	go host.rabbitConnector()
+	go host.connectionLoop()
 	host.connectionClose <- amqp.ErrClosed
 	return host
 }
@@ -84,35 +84,61 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 		log.Errorf("error when getting channel from connection: %v", err.Error())
 		return err
 	}
-	for _, b := range h.exchanges{
+	for _, b := range h.exchanges {
 		n, err := b.exchange.GetName()
-		if err != nil{
+		if err != nil {
 			log.Error(err)
 			return err
 		}
 		b.exchange.BuildExchange(ch)
 
-		for _, c := range b.consumers {
-			cfg, err := c.Init()
-			if err != nil{
-				log.Error(err)
-				return err
-			}
-			if cfg == nil{
-				cfg = &ConsumerConfig{}
-			}
-			queueChannel, err := h.connection.Channel()
-			if err != nil{
-				log.Error(err)
-				return err
-			}
-			h.channels[cfg.GetName()] = queueChannel
+		go func() {
+			for _, c := range b.consumers {
+				cfg, err := c.Init()
+				if err != nil {
+					log.Fatal(err)
+				}
+				if cfg == nil {
+					cfg = &ConsumerConfig{}
+				}
 
-			cfg.BuildConsumer(c, queueChannel, n, h.middleware)
-		}
+				for {
+					for h.connection == nil {
+						time.Sleep(200 * time.Millisecond)
+					}
+
+					queueChannel, err := h.connection.Channel()
+					if err != nil {
+						log.Error(err)
+						time.Sleep(200 * time.Millisecond)
+						continue
+					}
+					log.Infof("started channel %s", cfg.GetName())
+
+					// setup listener for channel errors
+					var rabbitErr *amqp.Error
+					closeChan := make(chan *amqp.Error)
+					queueChannel.NotifyClose(closeChan)
+
+					// add to our list of channels, for graceful stop on host stop
+					h.channels[cfg.GetName()] = queueChannel
+
+					// setup and run the consumer for this queue
+					cfg.BuildConsumer(c, queueChannel, n, h.middleware)
+					rabbitErr = <- closeChan
+					if rabbitErr == nil{
+						// actual close, just stop here
+						return
+					}
+					log.Infof("channel %s closed", cfg.GetName())
+					// channel closed, remove from the list
+					delete(h.channels, cfg.GetName())
+				}
+			}
+		}()
 	}
 
-	ch.Close() // discard this channel
+	ch.Close() // discard the setup channel
 	log.Infof("host started")
 	c := make(chan os.Signal, 2)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
@@ -129,7 +155,7 @@ func (h *RabbitHost) Stop(context.Context) error{
 	log.Infof("shutting down host")
 
 	for k, v := range h.channels{
-		log.Infof("closing channel for queue %s", k)
+		log.Infof("closing channel %s", k)
 		if err := v.Close(); err != nil{
 			log.Errorf("error when closing channel %s: %s",k, err)
 			continue
@@ -184,7 +210,6 @@ func errorHandler(h KeyHandlerFunc) HandlerFunc{
 	}
 }
 
-// HostMiddleware is
 type HostMiddleware func(handler HandlerFunc) HandlerFunc
 
 type MiddlewareList []HostMiddleware
@@ -204,18 +229,20 @@ func (h *RabbitHost) connect(){
 	}
 }
 
-func (h *RabbitHost) rabbitConnector() {
-	println("hit connecter")
+func (h *RabbitHost) connectionLoop() {
 	var rabbitErr *amqp.Error
 
 	for {
 		rabbitErr = <-h.connectionClose
 		if rabbitErr != nil {
+			h.connection = nil
 			log.Infof("connecting to %s\n", h.c.Address)
 
 			h.connect()
 			h.connectionClose = make(chan *amqp.Error)
-			for h.connection == nil {}
+			for h.connection == nil {
+				time.Sleep(200 *time.Millisecond)
+			}
 			h.connection.NotifyClose(h.connectionClose)
 		}
 	}

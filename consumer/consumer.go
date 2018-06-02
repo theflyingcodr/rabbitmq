@@ -95,10 +95,10 @@ type ConsumerConfig struct{
 // otherwise it returns a random uuid
 func(c *ConsumerConfig) GetName() string{
 	if c.Name == ""{
-		return uuid.NewUUID().String()
+		c.Name = uuid.NewUUID().String()
 	}
 
-	return fmt.Sprintf("%s-%s",c.Name, uuid.NewUUID().String())
+	return c.Name
 }
 
 // GetDurable returns the type of durability
@@ -192,28 +192,33 @@ func (c *ConsumerConfig) BuildConsumer(consumer Consumer, ch *amqp.Channel, ex s
 				log.Fatal(err)
 			}
 
-			for _, key := range r.Keys {
-				log.Debugf("binding key %s to queue %s",key, k)
-				if err = ch.QueueBind(k, key, ex, c.GetNoWait(), c.Args); err != nil {
-					log.Fatal(err)
-				}
-				if err = ch.QueueBind(dlq, key, fmt.Sprintf("%s.deadletter", ex), false, nil); err != nil {
-					log.Fatal(err)
-				}
-			}
-			log.Infof("queue %s setup",k)
+			err = bindQueues(r, k, err, ch, ex, c, dlq)
+			log.Infof("queue %s setup", k)
 
-			msgs, err := ch.Consume(k,c.Name,false,c.GetExclusive(),false,c.GetNoWait(), c.Args)
-			if err != nil{
+			msgs, err := ch.Consume(k, c.Name, false, c.GetExclusive(), false, c.GetNoWait(), c.Args)
+			if err != nil {
 				log.Fatal(err)
 			}
 
 			middleware := buildChain(consumer.Middleware(errorHandler(r.DeliveryFunc)), m)
-			for d := range msgs{
+			for d := range msgs {
 				panicHandler(middleware).HandleMessage(context.Background(), d)
 			}
 		}()
 	}
+}
+
+func bindQueues(r *Routes, k string, err error, ch *amqp.Channel, ex string, c *ConsumerConfig, dlq string) error {
+	for _, key := range r.Keys {
+		log.Debugf("binding key %s to queue %s", key, k)
+		if err = ch.QueueBind(k, key, ex, c.GetNoWait(), c.Args); err != nil {
+			log.Fatal(err)
+		}
+		if err = ch.QueueBind(dlq, key, fmt.Sprintf("%s.deadletter", ex), false, nil); err != nil {
+			log.Fatal(err)
+		}
+	}
+	return err
 }
 
 
