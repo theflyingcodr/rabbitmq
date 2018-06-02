@@ -1,3 +1,6 @@
+# Work In Progress
+This is in pre-alpha, needs a lot of testing!
+
 # RabbitMq
 A small wrapper library for [streadway/amqp](https://github.com/streadway/amqp) that provides an opinionated way of setting up RabbitMq consumers.
 

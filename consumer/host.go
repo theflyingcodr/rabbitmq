@@ -10,6 +10,8 @@ import (
 	"errors"
 	"runtime/debug"
 	"time"
+	"fmt"
+	"github.com/pborman/uuid"
 )
 
 // HostConfig contains global config
@@ -102,37 +104,40 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 					cfg = &ConsumerConfig{}
 				}
 
-				for {
-					for h.connection == nil {
-						time.Sleep(200 * time.Millisecond)
-					}
 
-					queueChannel, err := h.connection.Channel()
-					if err != nil {
-						log.Error(err)
-						time.Sleep(200 * time.Millisecond)
-						continue
-					}
-					log.Infof("started channel %s", cfg.GetName())
+				for k, r := range c.Queues(ctx){
+					go func(key string, routes *Routes) {
+						for {
+							// wait until we have a connection
+							if h.connection == nil {
+								time.Sleep(200 * time.Millisecond)
+								continue
+							}
 
-					// setup listener for channel errors
-					var rabbitErr *amqp.Error
-					closeChan := make(chan *amqp.Error)
-					queueChannel.NotifyClose(closeChan)
+							// attempt to get a channel
+							queueChannel, err := h.connection.Channel()
+							if err != nil{
+								log.Error("error setting up consumer queue for %s", key)
+								time.Sleep(500 *time.Millisecond)
+								continue
+							}
 
-					// add to our list of channels, for graceful stop on host stop
-					h.channels[cfg.GetName()] = queueChannel
+							// build the queue, if it's deleted it will be recreated
+							cfg.BuildQueue(key, routes, queueChannel, n)
 
-					// setup and run the consumer for this queue
-					cfg.BuildConsumer(c, queueChannel, n, h.middleware)
-					rabbitErr = <- closeChan
-					if rabbitErr == nil{
-						// actual close, just stop here
-						return
-					}
-					log.Infof("channel %s closed", cfg.GetName())
-					// channel closed, remove from the list
-					delete(h.channels, cfg.GetName())
+							// start consuming messages
+							msgs, err := queueChannel.Consume(key, fmt.Sprintf("%s-%s", cfg.GetName(), uuid.NewUUID()), false, cfg.GetExclusive(), false, cfg.GetNoWait(), cfg.Args)
+							if err != nil {
+								log.Fatal(err)
+							}
+
+							// setup global, consumer & default middleware
+							middleware := h.buildChain(c.Middleware(errorHandler(routes.DeliveryFunc)), h.middleware)
+							for d := range msgs {
+								panicHandler(middleware).HandleMessage(context.Background(), d)
+							}
+						}
+					}(k, r)
 				}
 			}
 		}()
@@ -220,6 +225,7 @@ func (h *RabbitHost) connect(){
 
 		if err == nil {
 			h.connection = conn
+			log.Infof("connected to %s successful\n", h.c.Address)
 			break
 		}
 
@@ -246,4 +252,15 @@ func (h *RabbitHost) connectionLoop() {
 			h.connection.NotifyClose(h.connectionClose)
 		}
 	}
+}
+
+
+// buildChain builds the middleware chain recursively, functions are first class
+func (h *RabbitHost) buildChain(f HandlerFunc, m MiddlewareList) HandlerFunc {
+	// if our chain is done, use the original handlerfunc
+	if len(m) == 0 {
+		return f
+	}
+	// otherwise nest the handlerfuncs
+	return m[0](h.buildChain(f, m[1:cap(m)]))
 }

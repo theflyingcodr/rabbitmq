@@ -80,7 +80,7 @@ func(c *MyConsumer)Queues(ctx context.Context) (map[string]*consumer.Routes){
 			DeliveryFunc:c.ErrorHandler, // handler func
 		},
 		"success":{ // queue name
-			Keys: []string{"test.message", "azert.#"}, // routing keys
+			Keys: []string{"test.success", "azert.#"}, // routing keys
 			DeliveryFunc:c.SuccessHandler, // handler func
 		},
 	}

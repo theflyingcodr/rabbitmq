@@ -169,43 +169,30 @@ func (e *ConsumerConfig) GetArgs() map[string]interface{}{
 	return e.Args
 }
 
-func (c *ConsumerConfig) BuildConsumer(consumer Consumer, ch *amqp.Channel, ex string, m MiddlewareList) {
-	for k, r := range consumer.Queues(context.Background()){
-		go func() {
-			log.Infof("setting up queue %s", k)
-			defer ch.Close()
+func (c *ConsumerConfig) BuildQueue(queueName string, routes *Routes, ch *amqp.Channel, ex string) {
+	log.Infof("setting up queue %s", queueName)
 
-			if err := ch.Qos(int(c.GetPrefetchCount()), int(c.GetPrefetchSize()), false); err != nil {
-				log.Fatal(err)
-			}
-
-			dlx := fmt.Sprintf("%s.deadletter", ex)
-			a := c.GetArgs()
-			a["x-dead-letter-exchange"] = dlx
-			_, err := ch.QueueDeclare(k, c.GetDurable(), c.GetAutoDelete(), c.GetExclusive(), c.GetNoWait(), a)
-			if err != nil {
-				log.Fatal(err)
-			}
-			dlq := fmt.Sprintf("%s.deadletter",k)
-			_, err = ch.QueueDeclare(dlq, true, false, false, false, nil)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			err = bindQueues(r, k, err, ch, ex, c, dlq)
-			log.Infof("queue %s setup", k)
-
-			msgs, err := ch.Consume(k, c.Name, false, c.GetExclusive(), false, c.GetNoWait(), c.Args)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			middleware := buildChain(consumer.Middleware(errorHandler(r.DeliveryFunc)), m)
-			for d := range msgs {
-				panicHandler(middleware).HandleMessage(context.Background(), d)
-			}
-		}()
+	if err := ch.Qos(int(c.GetPrefetchCount()), int(c.GetPrefetchSize()), false); err != nil {
+		log.Fatal(err)
 	}
+
+	dlx := fmt.Sprintf("%s.deadletter", ex)
+	a := c.GetArgs()
+
+	a["x-dead-letter-exchange"] = dlx
+	_, err := ch.QueueDeclare(queueName, c.GetDurable(), c.GetAutoDelete(), c.GetExclusive(), c.GetNoWait(), a)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	dlq := fmt.Sprintf("%s.deadletter",queueName)
+	_, err = ch.QueueDeclare(dlq, true, false, false, false, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = bindQueues(routes, queueName, err, ch, ex, c, dlq)
+	log.Infof("queue %s setup", queueName)
 }
 
 func bindQueues(r *Routes, k string, err error, ch *amqp.Channel, ex string, c *ConsumerConfig, dlq string) error {
@@ -221,14 +208,4 @@ func bindQueues(r *Routes, k string, err error, ch *amqp.Channel, ex string, c *
 	return err
 }
 
-
-// buildChain builds the middleware chain recursively, functions are first class
-func buildChain(f HandlerFunc, m MiddlewareList) HandlerFunc {
-	// if our chain is done, use the original handlerfunc
-	if len(m) == 0 {
-		return f
-	}
-	// otherwise nest the handlerfuncs
-	return m[0](buildChain(f, m[1:cap(m)]))
-}
 
