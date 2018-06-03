@@ -121,7 +121,7 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 								time.Sleep(500 *time.Millisecond)
 								continue
 							}
-
+							h.channels[key] = queueChannel
 							// build the queue, if it's deleted it will be recreated
 							cfg.BuildQueue(key, routes, queueChannel, n)
 
@@ -136,6 +136,9 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 							for d := range msgs {
 								panicHandler(middleware).HandleMessage(context.Background(), d)
 							}
+
+							// TODO handle channel notifyclose
+							delete(h.channels, key)
 						}
 					}(k, r)
 				}
