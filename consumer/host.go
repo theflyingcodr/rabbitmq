@@ -52,6 +52,7 @@ type RabbitHost struct{
 	wg *sync.WaitGroup
 	mu *sync.Mutex
 	connected bool
+	shutdown bool
 }
 
 type Exchange struct{
@@ -132,28 +133,17 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 								continue
 							}
 
+							h.mu.Lock()
+							h.channels[key] = queueChannel
+							h.mu.Unlock()
+
 							closeChannel := make(chan *amqp.Error)
 							cancelChannel := make(chan string)
 							queueChannel.NotifyClose(closeChannel)
 							queueChannel.NotifyCancel(cancelChannel)
 
-							h.mu.Lock()
-							h.channels[key] = queueChannel
-							h.mu.Unlock()
-
 							// build the queue, if it's deleted it will be recreated
 							cfg.BuildQueue(key, routes, queueChannel, n)
-
-							if cfg.GetHasDeadletter() {
-								// check queue every minute to check it hasn't been deleted,
-								// recreate it if we can
-								go func(){
-									for {
-										cfg.BuildDeadletterQueue(key, routes, queueChannel, n)
-										time.Sleep(time.Minute)
-									}
-								}()
-							}
 
 							// start consuming
 							go func() {
@@ -174,7 +164,7 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 
 							select {
 								case queueErr := <-closeChannel:
-									if queueErr == nil && !h.connected{
+									if h.shutdown{
 										// indicates a graceful shutdown
 										// exit the routine
 										return
@@ -184,14 +174,48 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 										log.Errorf("queue channel closed for queue %s: %s", k, queueErr.Error())
 									}
 								case <-cancelChannel:
+									if h.shutdown {
+										return
+									}
 									log.Infof("channel for queue %s deleted, recreating", k)
 							}
 							h.mu.Lock()
 							delete(h.channels, key)
 							h.mu.Unlock()
 						}
-
 					}(k, r)
+
+					// setup the dead letter queue
+					if cfg.GetHasDeadletter() {
+						// check queue every second to check it hasn't been deleted,
+						// recreate it if we can
+						go func(key string, routes *Routes){
+							h.wg.Add(1)
+							defer h.wg.Done()
+							for {
+								if h.shutdown{
+									return
+								}
+								for !h.connected{
+									time.Sleep(200 *time.Millisecond)
+								}
+
+								t := time.NewTimer(time.Second)
+								<-t.C
+
+								dlCh, err := h.connection.Channel()
+								if err != nil{
+									log.Error(err)
+									time.Sleep(200 *time.Millisecond)
+									break
+								}
+								if err := cfg.BuildDeadletterQueue(key, routes, dlCh, h.connection, n); err != nil{
+									log.Error(err)
+								}
+								t.Reset(time.Second)
+							}
+						}(k, r)
+					}
 				}
 			}
 		}()
@@ -212,6 +236,7 @@ func (h *RabbitHost) Middleware(fn ...HostMiddleware) {
 
 func (h *RabbitHost) Stop(context.Context) error{
 	log.Infof("shutting down host")
+	h.shutdown = true
 	h.connected = false
 	h.mu.Lock()
 	for k, v := range h.channels{
@@ -225,7 +250,9 @@ func (h *RabbitHost) Stop(context.Context) error{
 	h.mu.Unlock()
 	h.wg.Wait()
 
-	return h.connection.Close()
+	err := h.connection.Close()
+	log.Infof("shutdown completed")
+	return err
 }
 
 // panicHandler intercepts panics from a consumer, logs

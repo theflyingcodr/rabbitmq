@@ -205,13 +205,18 @@ func (c *ConsumerConfig) BuildQueue(queueName string, routes *Routes, ch *amqp.C
 	return
 }
 
-func (c *ConsumerConfig) BuildDeadletterQueue(queueName string, routes *Routes, ch *amqp.Channel, ex string) (err error) {
+func (c *ConsumerConfig) BuildDeadletterQueue(queueName string, routes *Routes, ch *amqp.Channel, con *amqp.Connection,  ex string) (err error) {
 	dlq := fmt.Sprintf("%s.deadletter",queueName)
 	if _, qErr := ch.QueueDeclarePassive(dlq, true, false, false, false, nil); qErr == nil{
+		ch.Close()
 		return
 	}
 
 	log.Infof("setting up queue %s", dlq)
+	ch, err = con.Channel()
+	if err != nil{
+		return
+	}
 
 	_, err = ch.QueueDeclare(dlq, true, false, false, false, nil)
 	if err != nil {
@@ -224,6 +229,7 @@ func (c *ConsumerConfig) BuildDeadletterQueue(queueName string, routes *Routes, 
 	}
 
 	log.Infof("deadletter queue %s setup", dlq)
+	ch.Close()
 	return
 }
 
