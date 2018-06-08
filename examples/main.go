@@ -11,8 +11,9 @@ import (
 func main(){
 	logrus.SetLevel(logrus.DebugLevel)
 
+	ec := consumer.NewErrorChannel()
 	// setup & configure our Host
-	host := consumer.NewConsumerHost(&consumer.HostConfig{Address:"amqp://guest:guest@localhost:5672/"})
+	host := consumer.NewConsumerHost(&consumer.HostConfig{Address:"amqp://guest:guest@localhost:5672/"}, ec)
 
 	// this is a basic example, config would usually be setup via env vars or a file
 	exchange := &consumer.ExchangeConfig{Name:"test"}
@@ -26,6 +27,15 @@ func main(){
 	// multiple brokers can be added if required
 	host.AddBroker(context.Background(), exchange, []consumer.Consumer{NewMyConsumer()})
 
+	go func(){
+		for {
+			hc := consumer.NewHealthCheckServer(&consumer.HealthCheckConfig{
+				Port:9999,
+			},host.GetConnectionStatus, ec)
+			hc.SetupRoutes()
+			hc.Run()
+		}
+	}()
 	// run the consumer, it will exit on a setup error
 	// or on a graceful shutdown ie ctrl+c
 	if err := host.Run(context.Background()); err != nil{

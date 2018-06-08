@@ -55,6 +55,7 @@ type RabbitHost struct{
 	mu *sync.Mutex
 	connected bool
 	shutdown bool
+	errorChannel ErrorChannel
 }
 
 type Exchange struct{
@@ -64,7 +65,7 @@ type Exchange struct{
 
 // Init sets up the initial connection & quality of service
 // to be used by all registered consumers
-func NewConsumerHost(cfg *HostConfig) Host{
+func NewConsumerHost(cfg *HostConfig, ec ErrorChannel) Host{
 	host := &RabbitHost{
 		exchanges:make([]Exchange, 0),
 		channels:make(map[string]*amqp.Channel),
@@ -73,6 +74,7 @@ func NewConsumerHost(cfg *HostConfig) Host{
 		wg: &sync.WaitGroup{},
 		connected:false,
 		mu: &sync.Mutex{},
+		errorChannel:ec,
 	}
 	go host.connectionLoop()
 	host.connectionClose <- amqp.ErrClosed
@@ -93,13 +95,13 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 	for h.connection == nil{}
 	ch, err := h.connection.Channel()
 	if err != nil{
-		log.Errorf("error when getting channel from connection: %v", err.Error())
+		go h.errorChannel.LogErrorf("error when getting channel from connection: %v", err.Error())
 		return err
 	}
 	for _, b := range h.exchanges {
 		n, err := b.exchange.GetName()
 		if err != nil {
-			log.Error(err)
+			go h.errorChannel.LogError(err)
 			return err
 		}
 		b.exchange.BuildExchange(ch)
@@ -130,7 +132,7 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 							// attempt to get a channel
 							queueChannel, err := h.connection.Channel()
 							if err != nil{
-								log.Error("error setting up consumer queue for %s", key)
+								go h.errorChannel.LogErrorf("error setting up consumer queue for %s",key)
 								time.Sleep(500 *time.Millisecond)
 								continue
 							}
@@ -173,7 +175,7 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 									} else if queueErr != nil{
 										// there was an error, usually due to connection being closed
 										// log it and then we attempt to recreate the channel & queue
-										log.Errorf("queue channel closed for queue %s: %s", k, queueErr.Error())
+										go h.errorChannel.LogErrorf("queue channel closed for queue %s: %s", k, queueErr.Error())
 									}
 								case <-cancelChannel:
 									if h.shutdown {
@@ -209,12 +211,12 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 
 								dlCh, err := h.connection.Channel()
 								if err != nil{
-									log.Error(err)
+									go h.errorChannel.LogError(err)
 									time.Sleep(200 *time.Millisecond)
 									break
 								}
 								if err := cfg.BuildDeadletterQueue(routes, dlCh, h.connection, n); err != nil{
-									log.Error(err)
+									go h.errorChannel.LogError(err)
 								}
 								t.Reset(time.Second)
 							}
@@ -246,7 +248,7 @@ func (h *RabbitHost) Stop(context.Context) error{
 	for k, v := range h.channels{
 		log.Infof("closing channel %s", k)
 		if err := v.Close(); err != nil{
-			log.Errorf("error when closing channel %s: %s",k, err)
+			go h.errorChannel.LogErrorf("error when closing channel %s: %s",k, err)
 			continue
 		}
 		log.Infof("channel for queue %s closed successfully", k)
@@ -322,7 +324,7 @@ func (h *RabbitHost) connect(){
 			break
 		}
 
-		log.Error(err)
+		go h.errorChannel.LogError(err)
 		log.Infof("Trying to reconnect to RabbitMQ at %s\n", h.c.Address)
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -334,7 +336,7 @@ func (h *RabbitHost) connectionLoop() {
 	for {
 		rabbitErr = <-h.connectionClose
 		if rabbitErr != nil {
-			log.Errorf("connection lost %s", rabbitErr.Error())
+			go h.errorChannel.LogErrorf("connection lost %s", rabbitErr.Error())
 			h.connected = false
 			log.Infof("connecting to %s\n", h.c.Address)
 
@@ -347,7 +349,6 @@ func (h *RabbitHost) connectionLoop() {
 		}
 	}
 }
-
 
 // buildChain builds the middleware chain recursively, functions are first class
 func (h *RabbitHost) buildChain(f HandlerFunc, m MiddlewareList) HandlerFunc {
