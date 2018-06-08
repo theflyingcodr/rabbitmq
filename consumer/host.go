@@ -12,6 +12,7 @@ import (
 	"time"
 	"fmt"
 	"github.com/pborman/uuid"
+	"sync"
 )
 
 // HostConfig contains global config
@@ -39,6 +40,8 @@ type Host interface{
 	Middleware(...HostMiddleware)
 	// Stop can be called when you wish to shut down the host
 	Stop(context.Context) error
+
+	GetConnectionStatus() bool
 }
 
 type RabbitHost struct{
@@ -48,6 +51,10 @@ type RabbitHost struct{
 	channels map[string]*amqp.Channel
 	middleware MiddlewareList
 	connectionClose chan *amqp.Error
+	wg *sync.WaitGroup
+	mu *sync.Mutex
+	connected bool
+	shutdown bool
 }
 
 type Exchange struct{
@@ -63,6 +70,9 @@ func NewConsumerHost(cfg *HostConfig) Host{
 		channels:make(map[string]*amqp.Channel),
 		c: cfg,
 		connectionClose:make(chan *amqp.Error),
+		wg: &sync.WaitGroup{},
+		connected:false,
+		mu: &sync.Mutex{},
 	}
 	go host.connectionLoop()
 	host.connectionClose <- amqp.ErrClosed
@@ -107,9 +117,12 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 
 				for k, r := range c.Queues(ctx){
 					go func(key string, routes *Routes) {
+						h.wg.Add(1)
+						defer h.wg.Done()
+
 						for {
 							// wait until we have a connection
-							if h.connection == nil {
+							if !h.connected {
 								time.Sleep(200 * time.Millisecond)
 								continue
 							}
@@ -121,26 +134,92 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 								time.Sleep(500 *time.Millisecond)
 								continue
 							}
+
+							h.mu.Lock()
 							h.channels[key] = queueChannel
+							h.mu.Unlock()
+
+							closeChannel := make(chan *amqp.Error)
+							cancelChannel := make(chan string)
+							queueChannel.NotifyClose(closeChannel)
+							queueChannel.NotifyCancel(cancelChannel)
+
 							// build the queue, if it's deleted it will be recreated
 							cfg.BuildQueue(key, routes, queueChannel, n)
 
-							// start consuming messages
-							msgs, err := queueChannel.Consume(key, fmt.Sprintf("%s-%s", cfg.GetName(), uuid.NewUUID()), false, cfg.GetExclusive(), false, cfg.GetNoWait(), cfg.Args)
-							if err != nil {
-								log.Fatal(err)
-							}
+							// start consuming
+							go func() {
+								h.wg.Add(1)
+								defer h.wg.Done()
+								// start consuming messages
+								msgs, err := queueChannel.Consume(key, fmt.Sprintf("%s-%s", cfg.GetName(), uuid.NewUUID()), false, cfg.GetExclusive(), false, cfg.GetNoWait(), cfg.Args)
+								if err != nil {
+									log.Fatal(err)
+								}
 
-							// setup global, consumer & default middleware
-							middleware := h.buildChain(c.Middleware(errorHandler(routes.DeliveryFunc)), h.middleware)
-							for d := range msgs {
-								panicHandler(middleware).HandleMessage(context.Background(), d)
-							}
+								// setup global, consumer & default middleware
+								middleware := h.buildChain(c.Middleware(errorHandler(routes.DeliveryFunc)), h.middleware)
+								for d := range msgs {
+									panicHandler(middleware).HandleMessage(context.Background(), d)
+								}
+							}()
 
-							// TODO handle channel notifyclose
+							select {
+								case queueErr := <-closeChannel:
+									if h.shutdown{
+										// indicates a graceful shutdown
+										// exit the routine
+										return
+									} else if queueErr != nil{
+										// there was an error, usually due to connection being closed
+										// log it and then we attempt to recreate the channel & queue
+										log.Errorf("queue channel closed for queue %s: %s", k, queueErr.Error())
+									}
+								case <-cancelChannel:
+									if h.shutdown {
+										return
+									}
+									log.Infof("channel for queue %s deleted, recreating", k)
+							}
+							h.mu.Lock()
 							delete(h.channels, key)
+							h.mu.Unlock()
 						}
 					}(k, r)
+
+					// setup the dead letter queue
+					if cfg.GetHasDeadletter() {
+						// check queue every second to check it hasn't been deleted,
+						// recreate it if we can
+						go func(key string, routes *Routes){
+							h.wg.Add(1)
+							defer h.wg.Done()
+							for {
+								// we're in the middle of shutdown, exit
+								if h.shutdown{
+									return
+								}
+								// wait for connection
+								for !h.connected{
+									time.Sleep(200 *time.Millisecond)
+								}
+
+								t := time.NewTimer(time.Second)
+								<-t.C
+
+								dlCh, err := h.connection.Channel()
+								if err != nil{
+									log.Error(err)
+									time.Sleep(200 *time.Millisecond)
+									break
+								}
+								if err := cfg.BuildDeadletterQueue(routes, dlCh, h.connection, n); err != nil{
+									log.Error(err)
+								}
+								t.Reset(time.Second)
+							}
+						}(k, r)
+					}
 				}
 			}
 		}()
@@ -161,7 +240,9 @@ func (h *RabbitHost) Middleware(fn ...HostMiddleware) {
 
 func (h *RabbitHost) Stop(context.Context) error{
 	log.Infof("shutting down host")
-
+	h.shutdown = true
+	h.connected = false
+	h.mu.Lock()
 	for k, v := range h.channels{
 		log.Infof("closing channel %s", k)
 		if err := v.Close(); err != nil{
@@ -170,8 +251,16 @@ func (h *RabbitHost) Stop(context.Context) error{
 		}
 		log.Infof("channel for queue %s closed successfully", k)
 	}
+	h.mu.Unlock()
+	h.wg.Wait()
 
-	return h.connection.Close()
+	err := h.connection.Close()
+	log.Infof("shutdown completed")
+	return err
+}
+
+func (h *RabbitHost) GetConnectionStatus() bool {
+	return h.connected
 }
 
 // panicHandler intercepts panics from a consumer, logs
@@ -227,6 +316,7 @@ func (h *RabbitHost) connect(){
 		conn, err := amqp.Dial(h.c.Address)
 
 		if err == nil {
+			h.connected = true
 			h.connection = conn
 			log.Infof("connected to %s successful\n", h.c.Address)
 			break
@@ -244,7 +334,8 @@ func (h *RabbitHost) connectionLoop() {
 	for {
 		rabbitErr = <-h.connectionClose
 		if rabbitErr != nil {
-			h.connection = nil
+			log.Errorf("connection lost %s", rabbitErr.Error())
+			h.connected = false
 			log.Infof("connecting to %s\n", h.c.Address)
 
 			h.connect()

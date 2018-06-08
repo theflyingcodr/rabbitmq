@@ -89,6 +89,8 @@ type ConsumerConfig struct{
 	PrefetchCount *uint
 	PrefetchSize *uint
 	Args map[string]interface{}
+	HasDeadletter *bool
+	DeadletterName *string
 }
 
 // GetName returns the consumer name if set in config
@@ -169,43 +171,86 @@ func (e *ConsumerConfig) GetArgs() map[string]interface{}{
 	return e.Args
 }
 
-func (c *ConsumerConfig) BuildQueue(queueName string, routes *Routes, ch *amqp.Channel, ex string) {
+// GetArgs gets a table of arbitrary arguments
+// which are passed to the exchange
+func (e *ConsumerConfig) GetHasDeadletter() bool{
+	if e.HasDeadletter == nil{
+		return true
+	}
+	return *e.HasDeadletter
+}
+
+// GetDeadletterName gets the name for the deadletter
+// queue to be setup, if nil then a name of %QueueName%.deadletter is used
+func (e *ConsumerConfig) GetDeadletterName() string{
+	if e.DeadletterName == nil{
+		return fmt.Sprintf("%s.deadletter",e.GetName())
+	}
+	return *e.DeadletterName
+}
+
+func (c *ConsumerConfig) BuildQueue(queueName string, routes *Routes, ch *amqp.Channel, ex string) (err error) {
 	log.Infof("setting up queue %s", queueName)
 
 	if err := ch.Qos(int(c.GetPrefetchCount()), int(c.GetPrefetchSize()), false); err != nil {
-		log.Fatal(err)
+		log.Error(err)
 	}
 
-	dlx := fmt.Sprintf("%s.deadletter", ex)
 	a := c.GetArgs()
+	if c.GetHasDeadletter() {
+		dlx := fmt.Sprintf("%s.deadletter", ex)
+		a["x-dead-letter-exchange"] = dlx
+	}
 
-	a["x-dead-letter-exchange"] = dlx
-	_, err := ch.QueueDeclare(queueName, c.GetDurable(), c.GetAutoDelete(), c.GetExclusive(), c.GetNoWait(), a)
+	_, err = ch.QueueDeclare(queueName, c.GetDurable(), c.GetAutoDelete(), c.GetExclusive(), c.GetNoWait(), a)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	dlq := fmt.Sprintf("%s.deadletter",queueName)
-	_, err = ch.QueueDeclare(dlq, true, false, false, false, nil)
-	if err != nil {
-		log.Fatal(err)
+	if err = bindQueue(routes, queueName, ch, ex, c); err != nil{
+		return
 	}
 
-	err = bindQueues(routes, queueName, err, ch, ex, c, dlq)
 	log.Infof("queue %s setup", queueName)
+	return
 }
 
-func bindQueues(r *Routes, k string, err error, ch *amqp.Channel, ex string, c *ConsumerConfig, dlq string) error {
+func (c *ConsumerConfig) BuildDeadletterQueue(routes *Routes, ch *amqp.Channel, con *amqp.Connection,  ex string) (err error) {
+	if _, qErr := ch.QueueDeclarePassive(c.GetDeadletterName(), true, false, false, false, nil); qErr == nil{
+		ch.Close()
+		return
+	}
+
+	log.Infof("setting up queue %s", c.GetDeadletterName())
+	ch, err = con.Channel()
+	if err != nil{
+		return
+	}
+
+	_, err = ch.QueueDeclare(c.GetDeadletterName(), true, false, false, false, nil)
+	if err != nil {
+		log.Errorf("error setting up deadletter queue named %s : %s", c.GetDeadletterName(), err.Error())
+		return
+	}
+
+	if err = bindQueue(routes, c.GetDeadletterName(), ch, fmt.Sprintf("%s.deadletter", ex), c); err != nil{
+		return
+	}
+
+	log.Infof("deadletter queue %s setup", c.GetDeadletterName())
+	ch.Close()
+	return
+}
+
+func bindQueue(r *Routes, k string, ch *amqp.Channel, ex string, c *ConsumerConfig) (err error) {
 	for _, key := range r.Keys {
 		log.Debugf("binding key %s to queue %s", key, k)
 		if err = ch.QueueBind(k, key, ex, c.GetNoWait(), c.Args); err != nil {
-			log.Fatal(err)
-		}
-		if err = ch.QueueBind(dlq, key, fmt.Sprintf("%s.deadletter", ex), false, nil); err != nil {
-			log.Fatal(err)
+			log.Errorf("error binding %s to queue %s: %s", key, k, err)
+			return
 		}
 	}
-	return err
+	return
 }
 
 
