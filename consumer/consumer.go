@@ -90,6 +90,7 @@ type ConsumerConfig struct{
 	PrefetchSize *uint
 	Args map[string]interface{}
 	HasDeadletter *bool
+	DeadletterName *string
 }
 
 // GetName returns the consumer name if set in config
@@ -179,6 +180,15 @@ func (e *ConsumerConfig) GetHasDeadletter() bool{
 	return *e.HasDeadletter
 }
 
+// GetDeadletterName gets the name for the deadletter
+// queue to be setup, if nil then a name of %QueueName%.deadletter is used
+func (e *ConsumerConfig) GetDeadletterName() string{
+	if e.DeadletterName == nil{
+		return fmt.Sprintf("%s.deadletter",e.GetName())
+	}
+	return *e.DeadletterName
+}
+
 func (c *ConsumerConfig) BuildQueue(queueName string, routes *Routes, ch *amqp.Channel, ex string) (err error) {
 	log.Infof("setting up queue %s", queueName)
 
@@ -205,30 +215,29 @@ func (c *ConsumerConfig) BuildQueue(queueName string, routes *Routes, ch *amqp.C
 	return
 }
 
-func (c *ConsumerConfig) BuildDeadletterQueue(queueName string, routes *Routes, ch *amqp.Channel, con *amqp.Connection,  ex string) (err error) {
-	dlq := fmt.Sprintf("%s.deadletter",queueName)
-	if _, qErr := ch.QueueDeclarePassive(dlq, true, false, false, false, nil); qErr == nil{
+func (c *ConsumerConfig) BuildDeadletterQueue(routes *Routes, ch *amqp.Channel, con *amqp.Connection,  ex string) (err error) {
+	if _, qErr := ch.QueueDeclarePassive(c.GetDeadletterName(), true, false, false, false, nil); qErr == nil{
 		ch.Close()
 		return
 	}
 
-	log.Infof("setting up queue %s", dlq)
+	log.Infof("setting up queue %s", c.GetDeadletterName())
 	ch, err = con.Channel()
 	if err != nil{
 		return
 	}
 
-	_, err = ch.QueueDeclare(dlq, true, false, false, false, nil)
+	_, err = ch.QueueDeclare(c.GetDeadletterName(), true, false, false, false, nil)
 	if err != nil {
-		log.Errorf("error setting up deadletter queue named %s : %s", dlq, err.Error())
+		log.Errorf("error setting up deadletter queue named %s : %s", c.GetDeadletterName(), err.Error())
 		return
 	}
 
-	if err = bindQueue(routes, dlq, ch, fmt.Sprintf("%s.deadletter", ex), c); err != nil{
+	if err = bindQueue(routes, c.GetDeadletterName(), ch, fmt.Sprintf("%s.deadletter", ex), c); err != nil{
 		return
 	}
 
-	log.Infof("deadletter queue %s setup", dlq)
+	log.Infof("deadletter queue %s setup", c.GetDeadletterName())
 	ch.Close()
 	return
 }

@@ -40,6 +40,8 @@ type Host interface{
 	Middleware(...HostMiddleware)
 	// Stop can be called when you wish to shut down the host
 	Stop(context.Context) error
+
+	GetConnectionStatus() bool
 }
 
 type RabbitHost struct{
@@ -193,9 +195,11 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 							h.wg.Add(1)
 							defer h.wg.Done()
 							for {
+								// we're in the middle of shutdown, exit
 								if h.shutdown{
 									return
 								}
+								// wait for connection
 								for !h.connected{
 									time.Sleep(200 *time.Millisecond)
 								}
@@ -209,7 +213,7 @@ func (h *RabbitHost) Run(ctx context.Context) (err error){
 									time.Sleep(200 *time.Millisecond)
 									break
 								}
-								if err := cfg.BuildDeadletterQueue(key, routes, dlCh, h.connection, n); err != nil{
+								if err := cfg.BuildDeadletterQueue(routes, dlCh, h.connection, n); err != nil{
 									log.Error(err)
 								}
 								t.Reset(time.Second)
@@ -253,6 +257,10 @@ func (h *RabbitHost) Stop(context.Context) error{
 	err := h.connection.Close()
 	log.Infof("shutdown completed")
 	return err
+}
+
+func (h *RabbitHost) GetConnectionStatus() bool {
+	return h.connected
 }
 
 // panicHandler intercepts panics from a consumer, logs
